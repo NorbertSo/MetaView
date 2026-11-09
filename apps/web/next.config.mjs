@@ -1,5 +1,7 @@
 import path from "node:path";
-import type { NextConfig } from "next";
+import { fileURLToPath } from "node:url";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
 
 const securityHeaders = [
   { key: "X-Frame-Options", value: "DENY" },
@@ -13,9 +15,10 @@ const securityHeaders = [
   },
 ];
 
-const config: NextConfig = {
+/** @type {import("next").NextConfig} */
+const config = {
   output: "standalone",
-  outputFileTracingRoot: path.join(import.meta.dirname, "../../"),
+  outputFileTracingRoot: path.join(here, "../../"),
   transpilePackages: ["@tv/core", "@tv/db"],
   poweredByHeader: false,
   serverExternalPackages: ["postgres"],
