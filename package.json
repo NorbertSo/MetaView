@@ -1,0 +1,16 @@
+{
+  "name": "trading-v5v",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "pnpm -r --filter ./packages/* build && pnpm -r --filter ./apps/* build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "migrate": "pnpm --filter @tv/db migrate",
+    "keygen": "node scripts/keygen.mjs"
+  }
+}

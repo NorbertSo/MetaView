@@ -1,0 +1,30 @@
+# Deployed by Coolify (Docker Compose build pack). Secrets come from Coolify environment variables.
+services:
+  worker:
+    build:
+      context: .
+      target: worker
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      SECRETS_PRIVATE_KEY: ${SECRETS_PRIVATE_KEY}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      WORKER_INSTANCE_ID: worker-1
+      RUN_MIGRATIONS: "true"
+    stop_grace_period: 30s
+
+  web:
+    build:
+      context: .
+      target: web
+    restart: unless-stopped
+    depends_on:
+      - worker
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      SECRETS_PUBLIC_KEY: ${SECRETS_PUBLIC_KEY}
+      SESSION_SECRET: ${SESSION_SECRET}
+      DASHBOARD_PASSWORD_HASH: ${DASHBOARD_PASSWORD_HASH}
+      PUBLIC_URL: ${PUBLIC_URL:-https://trading.v5v.pl}
+    expose:
+      - "3000"

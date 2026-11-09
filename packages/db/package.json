@@ -1,0 +1,26 @@
+{
+  "name": "@tv/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsup src/migrate-cli.ts --format esm --platform node --target node22 --out-dir dist --clean",
+    "migrate": "tsx src/migrate-cli.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "echo 'db: covered by integration tests'"
+  },
+  "dependencies": {
+    "postgres": "^3.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
