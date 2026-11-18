@@ -15,7 +15,8 @@ import { systemEvent } from "./events.js";
 async function main() {
   const config = loadConfig();
   const log = pino({ level: config.LOG_LEVEL, base: { svc: "worker", instance: config.WORKER_INSTANCE_ID } });
-  const sql = createDb({ url: config.DATABASE_URL, max: 12, applicationName: "tv-worker" });
+  // Supabase session pooler allows 15 clients in total: worker 8 + web 5 leaves room for a deploy overlap.
+  const sql = createDb({ url: config.DATABASE_URL, max: 8, applicationName: "tv-worker" });
   const ctx: Ctx = { sql, log, config, privateKey: privateKeyFromBase64(config.SECRETS_PRIVATE_KEY), stopping: { value: false } };
 
   if (config.RUN_MIGRATIONS === "true") {
