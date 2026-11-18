@@ -5,6 +5,7 @@ import { ago, fmtMoney, fmtNum, fmtPct, fmtSigned, fmtTime, pnlClass } from "@/l
 import { ActionForm, Card, Empty, Flash, PageHeader, Stat, StatusBadge } from "@/components/ui";
 import { VerdictBadge } from "@/components/verdict";
 import { setTradingEnabled } from "./actions/control";
+import { COMMITMENT_KEYS, COMMITMENT_SHORT } from "@/lib/commitments";
 
 export default async function Overview({ searchParams }: { searchParams: Promise<{ msg?: string; err?: string }> }) {
   const sp = await searchParams;
@@ -27,9 +28,21 @@ export default async function Overview({ searchParams }: { searchParams: Promise
     sql<{ id: string; code: string; action: string; symbol: string | null; status: string; decided_at: Date; probability: number | null }[]>`
       select d.id, a.code, d.action, d.symbol, d.status, d.decided_at, d.probability
       from decisions d join agents a on a.id = d.agent_id order by d.decided_at desc limit 12`,
-    sql<{ label: string; value: string; effective_from: Date }[]>`select label, value, effective_from from v_current_commitments order by key`,
+    sql<{ strategy_id: string; code: string; key: string; value: string }[]>`
+      select s.id as strategy_id, s.code, c.key, c.value from strategies s
+      left join v_current_commitments c on c.strategy_id = s.id
+      where s.status in ('draft','active','paused') order by s.code, c.key`,
     sql<{ pnl: number | null; trades: number }[]>`select sum(net_pnl) as pnl, count(*)::int as trades from trades where status = 'closed' and closed_at >= date_trunc('day', now())`,
   ]);
+
+  const commitmentsByStrategy: { id: string; code: string; items: { key: string; value: string }[]; missing: number }[] = [];
+  for (const c of commitments) {
+    let g = commitmentsByStrategy.find((x) => x.id === c.strategy_id);
+    if (!g) commitmentsByStrategy.push((g = { id: c.strategy_id, code: c.code, items: [], missing: 0 }));
+    if (c.key) g.items.push({ key: c.key, value: c.value });
+  }
+  const required = Object.keys(COMMITMENT_KEYS).filter((k) => k !== "other").length;
+  for (const g of commitmentsByStrategy) g.missing = required - g.items.length;
 
   const connected = accounts.filter((a) => a.status === "connected").length;
   const totalEquity = accounts.reduce((s, a) => s + (a.equity ?? 0), 0);
@@ -77,15 +90,25 @@ export default async function Overview({ searchParams }: { searchParams: Promise
           </ActionForm>
         </Card>
 
-        <Card title="Zobowiązania" actions={<Link href="/review?tab=commitments" className="link text-xs">zarządzaj</Link>}>
-          {commitments.length === 0 ? (
-            <Empty>Spisz zobowiązania, zanim pojawią się wyniki.</Empty>
+        <Card title="Zobowiązania (per strategia)" actions={<Link href="/strategies" className="link text-xs">strategie</Link>}>
+          {commitmentsByStrategy.length === 0 ? (
+            <Empty>Brak strategii. Zobowiązania spisujesz na stronie każdej strategii.</Empty>
           ) : (
-            <dl className="space-y-3 text-sm">
-              {commitments.map((c) => (
-                <div key={c.label}><dt className="text-xs text-muted">{c.label}</dt><dd>{c.value}</dd></div>
+            <div className="space-y-4 text-sm">
+              {commitmentsByStrategy.map((g) => (
+                <div key={g.id}>
+                  <div className="flex items-center justify-between mb-1">
+                    <Link href={`/strategies/${g.id}`} className="link font-medium">{g.code}</Link>
+                    {g.missing > 0 && <span className="text-xs text-warn">{g.missing} niespisane</span>}
+                  </div>
+                  {g.items.length === 0 ? <div className="text-xs text-warn">nic nie spisane</div> : (
+                    <dl className="space-y-1">{g.items.map((c) => (
+                      <div key={c.key} className="grid grid-cols-[9rem_1fr] gap-2"><dt className="text-xs text-muted">{COMMITMENT_SHORT[c.key] ?? c.key}</dt><dd>{c.value}</dd></div>))}
+                    </dl>
+                  )}
+                </div>
               ))}
-            </dl>
+            </div>
           )}
         </Card>
       </div>

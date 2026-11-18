@@ -65,14 +65,15 @@ export async function saveReviewSession(fd: FormData) {
 export async function saveCommitment(fd: FormData) {
   return runAction(fd, async () => {
     const sql = db();
+    const strategyId = req(fd, "strategy_id");
     const key = req(fd, "key");
     const supersedes = opt(fd, "supersedes_id");
     const value = req(fd, "value");
     const rationale = opt(fd, "rationale") ?? "";
     await sql.begin(async (tx) => {
-      await tx`insert into commitments (key, label, value, rationale, supersedes_id) values (${key}, ${req(fd, "label")}, ${value}, ${rationale}, ${supersedes})`;
+      await tx`insert into commitments (strategy_id, key, label, value, rationale, supersedes_id) values (${strategyId}, ${key}, ${req(fd, "label")}, ${value}, ${rationale}, ${supersedes})`;
       if (supersedes) {
-        await tx`insert into manual_overrides (kind, reason, details) values ('change_commitment', ${rationale || "zmiana zobowiązania"}, ${tx.json({ key, value } as never)})`;
+        await tx`insert into manual_overrides (kind, reason, details) values ('change_commitment', ${rationale || "zmiana zobowiązania"}, ${tx.json({ strategy_id: strategyId, key, value } as never)})`;
       }
     });
     return supersedes ? "Zmiana zaplanowana — wejdzie w życie za 7 dni." : "Zobowiązanie zapisane.";

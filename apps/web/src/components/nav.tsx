@@ -8,6 +8,7 @@ const ITEMS = [
   { href: "/strategies", label: "Strategie" },
   { href: "/decisions", label: "Decyzje" },
   { href: "/trades", label: "Transakcje" },
+  { href: "/instruments", label: "Walory" },
   { href: "/market", label: "Rynek" },
   { href: "/review", label: "Przegląd i wnioski" },
   { href: "/journal", label: "Dziennik" },

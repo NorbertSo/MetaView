@@ -2,17 +2,9 @@ import Link from "next/link";
 import { db } from "@/lib/db";
 import { fmtDate, fmtNum, fmtSigned } from "@/lib/format";
 import { ActionForm, Badge, Card, Empty, Field, Flash, PageHeader, StatusBadge, Tabs } from "@/components/ui";
-import { addSupport, createLesson, decideLesson, saveCommitment, saveReviewSession } from "../actions/review";
+import { addSupport, createLesson, decideLesson, saveReviewSession } from "../actions/review";
 
 export const dynamic = "force-dynamic";
-
-const COMMITMENT_KEYS: Record<string, string> = {
-  max_real_capital: "Maksymalna kwota na realne konto (bez dopłacania)",
-  real_account_conditions: "Warunki przejścia na realne konto",
-  project_end_condition: "Kiedy kończę projekt",
-  project_end_date: "Data ostatecznej oceny",
-  other: "Inne",
-};
 
 export default async function ReviewPage({ searchParams }: { searchParams: Promise<{ tab?: string; strategy?: string; msg?: string; err?: string }> }) {
   const sp = await searchParams;
@@ -29,7 +21,6 @@ export default async function ReviewPage({ searchParams }: { searchParams: Promi
   const tabs = [
     { key: "lessons", label: "Wnioski", href: `/review?tab=lessons${strategyId ? `&strategy=${strategyId}` : ""}` },
     { key: "sessions", label: "Przeglądy okresowe", href: `/review?tab=sessions${strategyId ? `&strategy=${strategyId}` : ""}` },
-    { key: "commitments", label: "Zobowiązania", href: "/review?tab=commitments" },
   ];
 
   return (
@@ -37,7 +28,7 @@ export default async function ReviewPage({ searchParams }: { searchParams: Promi
       <PageHeader title="Przegląd i wnioski" subtitle="Agent proponuje wnioski po każdej transakcji. Do jego kontekstu trafiają tylko te, które zatwierdzisz i które wspiera co najmniej 5 podobnych przypadków." />
       <Flash msg={sp.msg} err={sp.err} />
       <Tabs items={tabs} current={tab} />
-      {tab !== "commitments" && strategies.length > 0 && (
+      {strategies.length > 0 && (
         <div className="flex flex-wrap gap-2 mb-5">
           {strategies.map((s) => (
             <Link key={s.id} href={`/review?tab=${tab}&strategy=${s.id}`} className={`btn btn-sm ${s.id === strategyId ? "btn-primary" : ""}`}>
@@ -48,7 +39,10 @@ export default async function ReviewPage({ searchParams }: { searchParams: Promi
       )}
       {tab === "lessons" && (strategyId ? <Lessons strategyId={strategyId} back={back} /> : <Card><Empty>Brak strategii.</Empty></Card>)}
       {tab === "sessions" && (strategyId ? <Sessions strategyId={strategyId} back={back} sinceReview={strategies.find((s) => s.id === strategyId)?.since_review ?? 0} /> : <Card><Empty>Brak strategii.</Empty></Card>)}
-      {tab === "commitments" && <Commitments back={back} />}
+      {tab === "commitments" && (
+        <Card><p className="text-sm py-4">Zobowiązania są teraz spisywane osobno dla każdej strategii — znajdziesz je na stronie strategii.{" "}
+          {strategies.map((s) => <Link key={s.id} href={`/strategies/${s.id}`} className="link mr-3">{s.code}</Link>)}</p></Card>
+      )}
     </>
   );
 
@@ -150,48 +144,4 @@ export default async function ReviewPage({ searchParams }: { searchParams: Promi
     );
   }
 
-  async function Commitments({ back }: { back: string }) {
-    const rows = await sql<{ id: string; key: string; label: string; value: string; rationale: string; created_at: Date; effective_from: Date }[]>`
-      select * from commitments order by key, effective_from desc, created_at desc`;
-    const current = new Map<string, (typeof rows)[number]>();
-    for (const r of rows) if (r.effective_from <= new Date() && !current.has(r.key)) current.set(r.key, r);
-    const pendingFor = (key: string) => rows.find((r) => r.key === key && r.effective_from > new Date());
-    return (
-      <div className="space-y-4">
-        <Card title="Twoje zobowiązania">
-          <p className="text-sm text-muted mb-4">Spisane teraz, zanim pojawią się wyniki. Zmiana wymaga uzasadnienia i wchodzi w życie dopiero po 7 dniach — to bramka ryzyka dla Ciebie, nie dla agenta.</p>
-          <div className="grid lg:grid-cols-2 gap-4">
-            {Object.entries(COMMITMENT_KEYS).filter(([k]) => k !== "other").map(([key, label]) => {
-              const cur = current.get(key);
-              const pend = pendingFor(key);
-              return (
-                <div key={key} className="border border-line rounded-lg p-4">
-                  <div className="text-xs text-muted">{label}</div>
-                  <div className="text-base mt-1 mb-2">{cur?.value ?? <span className="text-warn">nie spisane</span>}</div>
-                  {cur && <div className="text-xs text-muted mb-2">od {fmtDate(cur.effective_from)}</div>}
-                  {pend && <div className="text-xs text-warn mb-2">Zaplanowana zmiana od {fmtDate(pend.effective_from)}: „{pend.value}” — {pend.rationale}</div>}
-                  <details open={!cur}>
-                    <summary className="text-xs link cursor-pointer">{cur ? "zaproponuj zmianę" : "spisz"}</summary>
-                    <ActionForm action={saveCommitment} back={back} className="space-y-2 mt-2">
-                      <input type="hidden" name="key" value={key} /><input type="hidden" name="label" value={label} />
-                      {cur && <input type="hidden" name="supersedes_id" value={pend?.id ?? cur.id} />}
-                      <textarea name="value" required rows={2} className="input w-full" placeholder={key === "max_real_capital" ? "np. 2000 zł, bez dopłat" : key === "project_end_condition" ? "np. jeśli po 4 miesiącach demo żadna strategia nie spełni kryteriów, kończę" : ""} />
-                      {cur && <textarea name="rationale" required minLength={10} rows={2} className="input w-full" placeholder="Uzasadnienie zmiany (min. 10 znaków)" />}
-                      <button className="btn btn-sm btn-primary">{cur ? "Zaplanuj zmianę" : "Zapisz"}</button>
-                    </ActionForm>
-                  </details>
-                </div>
-              );
-            })}
-          </div>
-        </Card>
-        <Card title="Historia zobowiązań" bodyClass="">
-          {rows.length === 0 ? <Empty>Brak.</Empty> : (
-            <table className="tbl"><thead><tr><th>Zobowiązanie</th><th>Treść</th><th>Uzasadnienie</th><th>Obowiązuje od</th></tr></thead>
-              <tbody>{rows.map((r) => <tr key={r.id}><td>{r.label}</td><td>{r.value}</td><td className="text-sm text-muted">{r.rationale || "—"}</td><td>{fmtDate(r.effective_from)}</td></tr>)}</tbody></table>
-          )}
-        </Card>
-      </div>
-    );
-  }
 }

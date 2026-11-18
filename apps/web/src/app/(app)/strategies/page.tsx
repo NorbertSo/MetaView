@@ -10,12 +10,15 @@ const STYLE: Record<string, string> = { swing: "swing", day: "day trading", even
 
 export default async function StrategiesPage({ searchParams }: { searchParams: Promise<{ msg?: string; err?: string }> }) {
   const sp = await searchParams;
-  const rows = await db()<{ id: string; code: string; name: string; style: string; status: string; created_at: Date; versions: number; approved: number | null; agents: number; has_criteria: boolean }[]>`
+  const rows = await db()<{ id: string; code: string; name: string; style: string; status: string; created_at: Date; versions: number; approved: number | null; agents: number; has_criteria: boolean; commitments: number; trades: number; instruments: number }[]>`
     select s.id, s.code, s.name, s.style, s.status, s.created_at,
            (select count(*)::int from strategy_versions v where v.strategy_id = s.id) as versions,
            (select max(version) from strategy_versions v where v.strategy_id = s.id and approved_at is not null) as approved,
            (select count(*)::int from agents a join strategy_versions v on v.id = a.strategy_version_id where v.strategy_id = s.id and a.status in ('active','paused')) as agents,
-           exists (select 1 from success_criteria c where c.strategy_id = s.id) as has_criteria
+           exists (select 1 from success_criteria c where c.strategy_id = s.id) as has_criteria,
+           (select count(*)::int from v_current_commitments c where c.strategy_id = s.id) as commitments,
+           (select coalesce(sum(trades_total), 0)::int from v_instrument_agent_stats i where i.strategy_id = s.id) as trades,
+           (select count(distinct symbol)::int from v_instrument_agent_stats i where i.strategy_id = s.id) as instruments
     from strategies s order by s.created_at`;
   return (
     <>
@@ -24,13 +27,15 @@ export default async function StrategiesPage({ searchParams }: { searchParams: P
       <Card bodyClass="" className="mb-6">
         {rows.length === 0 ? <Empty>Brak strategii.</Empty> : (
           <table className="tbl">
-            <thead><tr><th>Kod</th><th>Nazwa</th><th>Styl</th><th>Status</th><th>Wersje</th><th>Zatwierdzona</th><th>Agenci</th><th>Kryteria</th><th>Utworzona</th></tr></thead>
+            <thead><tr><th>Kod</th><th>Nazwa</th><th>Styl</th><th>Status</th><th>Wersje</th><th>Zatwierdzona</th><th>Agenci</th><th>Kryteria</th><th>Zobowiązania</th><th>Transakcje</th><th>Walory</th><th>Utworzona</th></tr></thead>
             <tbody>{rows.map((s) => (
               <tr key={s.id}>
                 <td><Link href={`/strategies/${s.id}`} className="link font-medium">{s.code}</Link></td>
                 <td>{s.name}</td><td>{STYLE[s.style]}</td><td><StatusBadge status={s.status} /></td>
                 <td>{s.versions}</td><td>{s.approved ? `v${s.approved}` : "—"}</td><td>{s.agents}</td>
                 <td>{s.has_criteria ? <StatusBadge status="ok" label="spisane" /> : <StatusBadge status="warn" label="brak" />}</td>
+                <td>{s.commitments >= 4 ? <StatusBadge status="ok" label="spisane" /> : <StatusBadge status="warn" label={`${s.commitments}/4`} />}</td>
+                <td>{s.trades}</td><td>{s.instruments}</td>
                 <td className="text-muted">{fmtDate(s.created_at)}</td>
               </tr>))}
             </tbody>

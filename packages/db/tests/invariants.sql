@@ -128,8 +128,13 @@ end $$;
 select pg_temp.expect_error($$ update success_criteria set min_trades = 1 $$, 'append-only');
 
 -- commitments behave the same way
-insert into commitments (id, key, label, value) values ('00000000-0000-0000-0000-000000000071', 'max_real_capital', 'Maks. kapitał', '2000 PLN');
-select pg_temp.expect_error($$ insert into commitments (key, label, value) values ('max_real_capital', 'x', '50000 PLN') $$, 'supersedes');
+insert into commitments (id, strategy_id, key, label, value) values ('00000000-0000-0000-0000-000000000071', '00000000-0000-0000-0000-000000000001', 'max_real_capital', 'Maks. kapitał', '2000 PLN');
+select pg_temp.expect_error($$ insert into commitments (strategy_id, key, label, value) values ('00000000-0000-0000-0000-000000000001', 'max_real_capital', 'x', '50000 PLN') $$, 'supersedes');
+-- another strategy has its own, independent commitments
+insert into strategies (id, code, name, style) values ('00000000-0000-0000-0000-000000000002', 'SW1', 'Swing', 'swing');
+insert into commitments (strategy_id, key, label, value) values ('00000000-0000-0000-0000-000000000002', 'max_real_capital', 'Maks. kapitał', '1000 PLN');
+select pg_temp.expect_error($$ insert into commitments (strategy_id, key, label, value, rationale, supersedes_id)
+  values ('00000000-0000-0000-0000-000000000002', 'max_real_capital', 'x', '3000 PLN', 'cross-strategy supersede', '00000000-0000-0000-0000-000000000071') $$, 'same strategy');
 select pg_temp.expect_error($$ delete from commitments $$, 'append-only');
 
 -- lessons cannot be approved without enough support

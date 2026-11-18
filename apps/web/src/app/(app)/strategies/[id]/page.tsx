@@ -4,6 +4,10 @@ import { db } from "@/lib/db";
 import { fmtDate } from "@/lib/format";
 import { ActionForm, Card, Empty, Field, Flash, KV, PageHeader, StatusBadge } from "@/components/ui";
 import { approveVersion, deleteDraftVersion, saveCriteria, saveVersion, updateStrategy } from "../../actions/strategies";
+import { saveCommitment } from "../../actions/review";
+import { COMMITMENT_KEYS, COMMITMENT_PLACEHOLDER } from "@/lib/commitments";
+import { instrumentHref, subclassLabel, sumAgg, type InstrumentAgg } from "@/lib/instruments";
+import { StatsTable, type StatsRow } from "@/components/instrument-table";
 
 export const dynamic = "force-dynamic";
 
@@ -17,7 +21,7 @@ export default async function StrategyPage({ params, searchParams }: { params: P
   const { id } = await params;
   const sp = await searchParams;
   const sql = db();
-  const [[s], versions, criteria, agents] = await Promise.all([
+  const [[s], versions, criteria, agents, commitments, instrumentStats] = await Promise.all([
     sql<{ id: string; code: string; name: string; style: string; status: string; description: string }[]>`select * from strategies where id = ${id}`,
     sql<{ id: string; version: number; rules_md: string; system_prompt: string; params: unknown; timeframes: string[]; instruments: string[]; content_hash: string; change_note: string; created_at: Date; approved_at: Date | null }[]>`
       select * from strategy_versions where strategy_id = ${id} order by version desc`,
@@ -26,6 +30,18 @@ export default async function StrategyPage({ params, searchParams }: { params: P
     sql<{ id: string; code: string; name: string; status: string; version: number; model: string }[]>`
       select a.id, a.code, a.name, a.status, v.version, m.display_name as model from agents a
       join strategy_versions v on v.id = a.strategy_version_id join llm_models m on m.id = a.model_id where v.strategy_id = ${id} order by a.created_at`,
+    sql<{ id: string; key: string; label: string; value: string; rationale: string; created_at: Date; effective_from: Date }[]>`
+      select * from commitments where strategy_id = ${id} order by key, effective_from desc, created_at desc`,
+    sql<(InstrumentAgg & { symbol: string; asset_class: string | null; last_trade_at: Date | null })[]>`
+      select s.symbol, i.asset_class,
+             sum(trades_total)::int as trades_total, sum(open_trades)::int as open_trades, sum(closed_trades)::int as closed_trades,
+             sum(wins)::int as wins, sum(losses)::int as losses, sum(long_closed)::int as long_closed, sum(long_wins)::int as long_wins,
+             sum(short_closed)::int as short_closed, sum(short_wins)::int as short_wins, sum(net_pnl) as net_pnl, sum(gross_profit) as gross_profit,
+             sum(gross_loss) as gross_loss, sum(costs) as costs, sum(open_pnl) as open_pnl, sum(r_count)::int as r_count, sum(total_r) as total_r,
+             max(best_r) as best_r, min(worst_r) as worst_r, sum(hold_hours_sum) as hold_hours_sum, max(last_trade_at) as last_trade_at
+      from v_instrument_agent_stats s
+      left join lateral (select asset_class from instruments where symbol = s.symbol order by updated_at desc limit 1) i on true
+      where s.strategy_id = ${id} group by s.symbol, i.asset_class order by sum(trades_total) desc, s.symbol`,
   ]);
   if (!s) notFound();
   const back = `/strategies/${id}`;
@@ -34,6 +50,18 @@ export default async function StrategyPage({ params, searchParams }: { params: P
   const base = editing ?? draft ?? versions[0];
   const current = criteria.find((c) => c.effective_from <= new Date());
   const pending = criteria.filter((c) => c.effective_from > new Date());
+  const now = new Date();
+  const currentCommitment = new Map<string, (typeof commitments)[number]>();
+  for (const c of commitments) if (c.effective_from <= now && !currentCommitment.has(c.key)) currentCommitment.set(c.key, c);
+  const pendingCommitment = (key: string) => commitments.find((c) => c.key === key && c.effective_from > now);
+  const missingCommitments = Object.keys(COMMITMENT_KEYS).filter((k) => k !== "other" && !currentCommitment.has(k)).length;
+  // Instruments the current version trades on, shown even before the first trade.
+  const plannedSymbols = (versions.find((v) => v.approved_at) ?? versions[0])?.instruments ?? [];
+  const traded = new Set(instrumentStats.map((r) => r.symbol));
+  const instrumentRows: StatsRow[] = [
+    ...instrumentStats.map((r) => ({ ...r, key: r.symbol, label: <Link href={instrumentHref(r.symbol)} className="link font-medium mono">{r.symbol}</Link>, sub: subclassLabel(r.asset_class) })),
+    ...plannedSymbols.filter((sym) => !traded.has(sym)).map((sym) => ({ ...sumAgg([]), key: sym, label: <Link href={instrumentHref(sym)} className="link font-medium mono">{sym}</Link>, sub: "w regułach, bez transakcji" })),
+  ];
 
   return (
     <>
@@ -87,6 +115,50 @@ export default async function StrategyPage({ params, searchParams }: { params: P
           </details>
         </Card>
       </div>
+
+      <Card title="Zobowiązania wobec tej strategii" className="mb-6"
+        actions={missingCommitments > 0 ? <span className="text-xs text-warn">{missingCommitments} niespisane</span> : undefined}>
+        <p className="text-sm text-muted mb-4">Spisane teraz, zanim pojawią się wyniki. Zmiana wymaga uzasadnienia i wchodzi w życie dopiero po 7 dniach — to bramka ryzyka dla Ciebie, nie dla agenta.</p>
+        <div className="grid md:grid-cols-2 xl:grid-cols-4 gap-4">
+          {Object.entries(COMMITMENT_KEYS).filter(([k]) => k !== "other").map(([key, label]) => {
+            const cur = currentCommitment.get(key);
+            const pend = pendingCommitment(key);
+            return (
+              <div key={key} className="border border-line rounded-lg p-4">
+                <div className="text-xs text-muted">{label}</div>
+                <div className="text-base mt-1 mb-2">{cur?.value ?? <span className="text-warn">nie spisane</span>}</div>
+                {cur && <div className="text-xs text-muted mb-2">od {fmtDate(cur.effective_from)}</div>}
+                {pend && <div className="text-xs text-warn mb-2">Zaplanowana zmiana od {fmtDate(pend.effective_from)}: „{pend.value}” — {pend.rationale}</div>}
+                <details open={!cur}>
+                  <summary className="text-xs link cursor-pointer">{cur ? "zaproponuj zmianę" : "spisz"}</summary>
+                  <ActionForm action={saveCommitment} back={back} className="space-y-2 mt-2">
+                    <input type="hidden" name="strategy_id" value={s.id} />
+                    <input type="hidden" name="key" value={key} /><input type="hidden" name="label" value={label} />
+                    {cur && <input type="hidden" name="supersedes_id" value={pend?.id ?? cur.id} />}
+                    <textarea name="value" required rows={2} className="input w-full" placeholder={COMMITMENT_PLACEHOLDER[key] ?? ""} />
+                    {cur && <textarea name="rationale" required minLength={10} rows={2} className="input w-full" placeholder="Uzasadnienie zmiany (min. 10 znaków)" />}
+                    <button className="btn btn-sm btn-primary">{cur ? "Zaplanuj zmianę" : "Zapisz"}</button>
+                  </ActionForm>
+                </details>
+              </div>
+            );
+          })}
+        </div>
+        {commitments.length > 0 && (
+          <details className="mt-4">
+            <summary className="text-xs link cursor-pointer">Historia zobowiązań ({commitments.length})</summary>
+            <table className="tbl mt-2"><thead><tr><th>Zobowiązanie</th><th>Treść</th><th>Uzasadnienie</th><th>Obowiązuje od</th></tr></thead>
+              <tbody>{commitments.map((c) => <tr key={c.id}><td>{c.label}</td><td>{c.value}</td><td className="text-sm text-muted">{c.rationale || "—"}</td><td>{fmtDate(c.effective_from)}</td></tr>)}</tbody></table>
+          </details>
+        )}
+      </Card>
+
+      <Card title="Walory w tej strategii" bodyClass="" className="mb-6"
+        actions={<Link href="/instruments" className="link text-xs">wszystkie walory</Link>}>
+        {instrumentRows.length === 0 ? <Empty>Brak transakcji i instrumentów w regułach.</Empty> : (
+          <StatsTable rows={instrumentRows} total={instrumentStats.length > 1 ? { ...sumAgg(instrumentStats), key: "total", label: "Razem" } : undefined} showDrawdown={false} />
+        )}
+      </Card>
 
       <Card title="Wersje" bodyClass="" className="mb-6">
         {versions.length === 0 ? <Empty>Brak wersji — dodaj pierwszą poniżej.</Empty> : (
