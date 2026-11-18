@@ -4,6 +4,8 @@ import { fmtNum, fmtPct, fmtSigned, fmtTime, pnlClass } from "@/lib/format";
 import { fmtHours, groupLabel, groupOf, metrics, subclassLabel, sumAgg, type InstrumentAgg } from "@/lib/instruments";
 import { Card, Empty, KV, PageHeader, Stat, StatusBadge } from "@/components/ui";
 import { StatsTable, type StatsRow } from "@/components/instrument-table";
+import { costRows } from "@/lib/cost-data";
+import { notionalPerLot, pointsValue, rolloverLabel, sessionsLabel, swapModeLabel, swapNightsPerWeek, swapPerNight, tripleSwapDay } from "@/lib/costs";
 
 export const dynamic = "force-dynamic";
 
@@ -16,7 +18,7 @@ type AgentAgg = InstrumentAgg & { agent_id: string; strategy_id: string; code: s
 export default async function InstrumentPage({ params }: { params: Promise<{ symbol: string }> }) {
   const symbol = decode((await params).symbol);
   const sql = db();
-  const [[stats], [spec], perAgent, trades, months] = await Promise.all([
+  const [[stats], [spec], perAgent, trades, months, [cost], hours, [acct]] = await Promise.all([
     sql<(InstrumentAgg & { description: string | null; asset_class: string | null; currency_profit: string | null; max_drawdown: number; first_trade_at: Date | null; last_trade_at: Date | null })[]>`
       select * from v_instrument_stats where symbol = ${symbol}`,
     sql<{ broker_server: string; digits: number; contract_size: number | null; volume_min: number; volume_max: number; volume_step: number; currency_profit: string | null; currency_margin: string | null;
@@ -35,7 +37,16 @@ export default async function InstrumentPage({ params }: { params: Promise<{ sym
       select date_trunc('month', closed_at) as month, count(*)::int as trades, count(*) filter (where net_pnl > 0)::int as wins,
              sum(net_pnl) as net_pnl, sum(r_multiple) as total_r
       from trades where symbol = ${symbol} and status = 'closed' group by 1 order by 1 desc limit 24`,
+    costRows(symbol),
+    sql<{ hour: number; n: number; median: number; p90: number }[]>`
+      select extract(hour from sampled_at at time zone 'Europe/Warsaw')::int as hour, count(*)::int as n,
+             percentile_cont(0.5) within group (order by spread_points) as median,
+             percentile_cont(0.9) within group (order by spread_points) as p90
+      from spread_samples where symbol = ${symbol} and context in ('periodic','decision') and sampled_at > now() - interval '14 days'
+      group by 1 order by 1`,
+    sql<{ currency: string | null }[]>`select currency from mt_accounts where status <> 'archived' order by created_at limit 1`,
   ]);
+  const ccy = acct?.currency ?? "";
 
   if (!stats && !spec) {
     return (<><PageHeader title={symbol} /><Card><Empty>Nie znam tego waloru. <Link href="/instruments" className="link">Wróć do listy</Link>.</Empty></Card></>);
@@ -71,6 +82,81 @@ export default async function InstrumentPage({ params }: { params: Promise<{ sym
         <Stat label="Maks. DD / koszty" value={stats?.max_drawdown ? fmtNum(-stats.max_drawdown) : "—"} hint={`koszty ${fmtNum(s.costs)} · śr. czas ${fmtHours(m.avgHoldHours)}`} />
       </div>
 
+
+      {cost && (() => {
+        const nowPts = cost.last_bid !== null && cost.last_ask !== null ? (cost.last_ask - cost.last_bid) / cost.point : null;
+        const sl = swapPerNight(cost.swap_long, cost), ss = swapPerNight(cost.swap_short, cost);
+        const nights = swapNightsPerWeek(cost.raw);
+        const spreadLot = pointsValue(cost.median_7d ?? nowPts, cost);
+        const commission = cost.commission_per_lot;
+        const roundTrip = spreadLot !== null ? spreadLot + Math.abs(commission ?? 0) : null;
+        const maxHour = Math.max(1, ...hours.map((h) => h.p90));
+        return (
+          <div className="grid lg:grid-cols-3 gap-4 mb-6">
+            <Card title={`Koszty na 1 lot (${ccy || "waluta konta"})`} className="lg:col-span-2">
+              <div className="grid md:grid-cols-2 gap-x-8 gap-y-5 text-sm">
+                <div>
+                  <div className="text-xs text-muted mb-1">Spread (koszt wejścia i wyjścia)</div>
+                  <KV items={[
+                    ["Teraz", nowPts !== null ? `${fmtNum(nowPts, 0)} pkt · ${fmtNum(pointsValue(nowPts, cost))}` : "—"],
+                    ["Mediana 7 dni", cost.median_7d !== null ? `${fmtNum(cost.median_7d, 0)} pkt · ${fmtNum(pointsValue(cost.median_7d, cost))}` : "zbieram próbki"],
+                    ["Średnia / p90 / maks.", cost.avg_7d !== null ? `${fmtNum(cost.avg_7d, 1)} / ${fmtNum(cost.p90_7d, 0)} / ${fmtNum(cost.max_7d, 0)} pkt` : "—"],
+                    ["Próbki", `${cost.n_7d ?? 0} z 7 dni · ${cost.n_all ?? 0} łącznie`],
+                  ]} />
+                </div>
+                <div>
+                  <div className="text-xs text-muted mb-1">Swap (finansowanie pozycji przez noc)</div>
+                  <KV items={[
+                    ["Long / noc", <span key="l" className={sl !== null && sl < 0 ? "text-bad" : sl ? "text-good" : ""}>{fmtNum(sl)}</span>],
+                    ["Short / noc", <span key="s" className={ss !== null && ss < 0 ? "text-bad" : ss ? "text-good" : ""}>{fmtNum(ss)}</span>],
+                    ["Tydzień trzymania", `long ${fmtNum(sl !== null ? sl * nights : null)} · short ${fmtNum(ss !== null ? ss * nights : null)}`],
+                    ["Stawka brokera", `long ${cost.swap_long ?? "—"} · short ${cost.swap_short ?? "—"} (${swapModeLabel(cost.raw.swapMode)})`],
+                    ["Potrójny swap", `${tripleSwapDay(cost.raw)} (${nights} naliczeń na tydzień)`],
+                  ]} />
+                </div>
+                <div>
+                  <div className="text-xs text-muted mb-1">Depozyt i wartość</div>
+                  <KV items={[
+                    ["Depozyt / lot", cost.margin_per_lot !== null ? fmtNum(cost.margin_per_lot) : "—"],
+                    ["Wartość nominalna 1 lota", fmtNum(notionalPerLot(cost), 0)],
+                    ["Dźwignia efektywna", cost.margin_per_lot && notionalPerLot(cost) ? `1:${fmtNum(notionalPerLot(cost)! / cost.margin_per_lot, 0)}` : "—"],
+                    ["Wartość 1 punktu", fmtNum(pointsValue(1, cost), 4)],
+                  ]} />
+                </div>
+                <div>
+                  <div className="text-xs text-muted mb-1">Prowizje, poślizg, rolowanie</div>
+                  <KV items={[
+                    ["Prowizja / lot", commission !== null ? fmtNum(commission) : "brak zamkniętych transakcji"],
+                    ["Koszt wejścia+wyjścia", roundTrip !== null ? `${fmtNum(roundTrip)} (spread${commission ? " + prowizja" : ""})` : "—"],
+                    ["Śr. poślizg", cost.avg_abs_slippage_points !== null ? `${fmtNum(cost.avg_abs_slippage_points, 1)} pkt` : "—"],
+                    ["Swap zapłacony w transakcjach", cost.trade_swap !== null ? fmtNum(cost.trade_swap) : "—"],
+                    ["Rolowanie", rolloverLabel(cost.raw)],
+                    ["Sesja (czas serwera)", sessionsLabel(cost.raw)],
+                  ]} />
+                </div>
+              </div>
+              <p className="text-xs text-muted mt-4">Swapy, depozyt i kwotowania odświeżane automatycznie (kwotowanie co 10 min, specyfikacja i depozyt co 12 h). Ostatnie kwotowanie: {cost.quote_at ? fmtTime(cost.quote_at) : "—"}.</p>
+            </Card>
+            <Card title="Spread wg godziny (czas PL, 14 dni)" bodyClass="card-b">
+              {hours.length === 0 ? <Empty>Zbieram próbki — pierwsze wartości po kilku godzinach.</Empty> : (
+                <div className="space-y-1 text-xs">
+                  {hours.map((h) => (
+                    <div key={h.hour} className="grid grid-cols-[2.5rem_1fr_4.5rem] items-center gap-2">
+                      <span className="text-muted">{String(h.hour).padStart(2, "0")}:00</span>
+                      <div className="h-2.5 bg-panel-2 rounded relative">
+                        <div className="absolute inset-y-0 left-0 rounded bg-accent/30" style={{ width: `${(h.p90 / maxHour) * 100}%` }} />
+                        <div className="absolute inset-y-0 left-0 rounded bg-accent" style={{ width: `${(h.median / maxHour) * 100}%` }} />
+                      </div>
+                      <span className="text-right">{fmtNum(h.median, 0)} / {fmtNum(h.p90, 0)}</span>
+                    </div>
+                  ))}
+                  <p className="text-muted pt-2">mediana / p90 w punktach; jaśniejszy pasek = p90</p>
+                </div>
+              )}
+            </Card>
+          </div>
+        );
+      })()}
       <div className="grid lg:grid-cols-3 gap-4 mb-6">
         <Card title="Wyniki miesięczne" bodyClass="" className="lg:col-span-2">
           {months.length === 0 ? <Empty>Brak zamkniętych transakcji.</Empty> : (

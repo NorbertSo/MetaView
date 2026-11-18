@@ -9,6 +9,7 @@ import { computeEventReactions, dueEventTriggers, sampleEventWindows } from "./m
 import { buildReport } from "./reports/daily.js";
 import { getSetting } from "./settings.js";
 import { runSource } from "./sources/index.js";
+import { actualsDueSoon } from "./sources/tradingview.js";
 import { notify } from "./telegram.js";
 import { heartbeat, syncAll } from "./trading/sync.js";
 
@@ -100,14 +101,19 @@ export function startScheduler(ctx: Ctx, mt: MetaApiManager): () => void {
     if (firesAt(daily.cron, minute) && once("daily")) {
       buildReport(ctx, "daily").then((r) => notify(ctx, r)).catch((err) => ctx.log.error({ err }, "daily report failed"));
     }
-    if (firesAt("7 */6 * * *", minute) && once("ff")) runSource(ctx, "forexfactory").catch((err) => ctx.log.warn({ err }, "forexfactory failed"));
-    if (firesAt("20 2 * * 6", minute) && once("cot")) runSource(ctx, "cftc_cot").catch((err) => ctx.log.warn({ err }, "cftc failed"));
+    if (firesAt("7 * * * *", minute) && once("ff")) runSource(ctx, "forexfactory").catch((err) => ctx.log.warn({ err }, "forexfactory failed"));
+    // CFTC publishes on Friday 15:30 ET, later after US holidays; polling every 3 hours picks it up within hours.
+    if (firesAt("20 */3 * * *", minute) && once("cot")) runSource(ctx, "cftc_cot").catch((err) => ctx.log.warn({ err }, "cftc failed"));
+    // Actual figures: every minute while a release is due, otherwise every 15 minutes.
+    if (once("actuals") && (firesAt("*/15 * * * *", minute) || (await actualsDueSoon(ctx).catch(() => false)))) {
+      runSource(ctx, "tradingview").catch((err) => ctx.log.warn({ err }, "tradingview actuals failed"));
+    }
     if (firesAt("40 3 * * *", minute) && once("retention")) await retention(ctx);
   }));
 
   // Initial data if missing/stale.
   void (async () => {
-    const stale = await ctx.sql<{ code: string }[]>`select code from v_data_source_health where code in ('forexfactory','cftc_cot') and health in ('never','stale')`;
+    const stale = await ctx.sql<{ code: string }[]>`select code from v_data_source_health where code in ('forexfactory','cftc_cot','tradingview') and health in ('never','stale')`;
     for (const s of stale) await runSource(ctx, s.code).catch((err) => ctx.log.warn({ err, source: s.code }, "initial fetch failed"));
   })();
 

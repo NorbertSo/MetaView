@@ -5,3 +5,4 @@ export * from "./criteria.js";
 export * from "./cron.js";
 export * from "./pricing.js";
 export * from "./figures.js";
+export * from "./event-match.js";

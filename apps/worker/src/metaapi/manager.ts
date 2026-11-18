@@ -137,6 +137,10 @@ export class MetaApiManager {
   symbolPrice(id: string, symbol: string): Promise<SymbolPrice> { return this.withConn(id, (c) => c.getSymbolPrice(symbol, false)); }
   symbolSpecification(id: string, symbol: string): Promise<SymbolSpecification> { return this.withConn(id, (c) => c.getSymbolSpecification(symbol)); }
   symbols(id: string): Promise<string[]> { return this.withConn(id, (c) => c.getSymbols()); }
+  /** Margin in account currency required to open `volume` lots at `openPrice`. */
+  calculateMargin(id: string, order: { symbol: string; type: "ORDER_TYPE_BUY" | "ORDER_TYPE_SELL"; volume: number; openPrice: number }): Promise<{ margin: number }> {
+    return this.withConn(id, (c) => c.calculateMargin(order));
+  }
   serverTime(id: string): Promise<{ time: Date }> { return this.withConn(id, (c) => c.getServerTime()); }
 
   async candles(metaapiAccountId: string, symbol: string, timeframe: string, limit: number): Promise<Candle[]> {

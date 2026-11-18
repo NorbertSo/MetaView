@@ -67,3 +67,47 @@ export async function recordSpread(ctx: Ctx, server: string, symbol: string, bid
     insert into spread_samples (broker_server, symbol, bid, ask, spread_points, context, ref_id)
     values (${server}, ${symbol}, ${bid}, ${ask}, ${Math.round(((ask - bid) / point) * 100) / 100}, ${context}, ${refId})`;
 }
+
+// ---------------------------------------------------------------------------
+// Watchlist: quotes, spreads, swaps and margin for every instrument we keep.
+// ---------------------------------------------------------------------------
+const lastQuote = new Map<string, number>();
+const QUOTE_EVERY_MS = 10 * 60_000;
+const SPEC_EVERY_MS = 12 * 3600_000;
+/** A quote older than this means the market is closed: no spread sample (weekend spreads are meaningless). */
+const STALE_QUOTE_MS = 10 * 60_000;
+
+/**
+ * Samples bid/ask for all synced instruments except single stocks and dated futures, plus anything an active
+ * agent trades; refreshes specs (swap rates change daily) and the margin for 1 lot twice a day.
+ */
+export async function sampleWatchlist(ctx: Ctx, mt: MetaApiManager, acc: AccountRef): Promise<void> {
+  const rows = await ctx.sql<{ symbol: string; point: number; tick_size: number; updated_at: Date; margin_checked_at: Date | null }[]>`
+    select symbol, point, tick_size, updated_at, margin_checked_at from instruments
+    where broker_server = ${acc.server}
+      and (coalesce(asset_class, '') not in ('Stock CFDs', 'Index Futures CFDs', 'Commodity Futures CFDs')
+           or symbol in (select unnest(instruments) from agents where mt_account_id = ${acc.id} and status = 'active'))`;
+  const now = Date.now();
+  let done = 0;
+  for (const r of rows) {
+    const key = `${acc.id}:${r.symbol}`;
+    if (now - (lastQuote.get(key) ?? 0) < QUOTE_EVERY_MS) continue;
+    if (++done > 12) break; // spread the work over several sync ticks so trading sync is never held up
+    lastQuote.set(key, now);
+    try {
+      if (now - r.updated_at.getTime() > SPEC_EVERY_MS) await refreshSpec(ctx, mt, acc, r.symbol);
+      const q = await mt.symbolPrice(acc.metaapi_account_id, r.symbol);
+      const quoteAge = q.time ? now - new Date(q.time).getTime() : 0;
+      const tickValue = q.lossTickValue || q.profitTickValue || null;
+      await ctx.sql`update instruments set last_bid = ${q.bid}, last_ask = ${q.ask}, tick_value = ${tickValue}, quote_at = ${q.time ? new Date(q.time) : new Date()}
+                    where broker_server = ${acc.server} and symbol = ${r.symbol}`;
+      if (quoteAge < STALE_QUOTE_MS && q.ask > q.bid) await recordSpread(ctx, acc.server, r.symbol, q.bid, q.ask, r.point, "periodic");
+      if (!r.margin_checked_at || now - r.margin_checked_at.getTime() > SPEC_EVERY_MS) {
+        const m = await mt.calculateMargin(acc.metaapi_account_id, { symbol: r.symbol, type: "ORDER_TYPE_BUY", volume: 1, openPrice: q.ask });
+        await ctx.sql`update instruments set margin_per_lot = ${m.margin}, margin_checked_at = now() where broker_server = ${acc.server} and symbol = ${r.symbol}`;
+      }
+    } catch (err) {
+      ctx.log.debug({ err, symbol: r.symbol }, "watchlist sample failed");
+    }
+  }
+}

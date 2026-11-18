@@ -20,7 +20,13 @@ export default async function Overview({ searchParams }: { searchParams: Promise
       left join lateral (select equity, balance from account_snapshots where mt_account_id = m.id order by taken_at desc limit 1) s on true
       left join lateral (select checked_at, latency_ms from connection_heartbeats where mt_account_id = m.id order by checked_at desc limit 1) h on true
       where m.status <> 'archived' order by m.created_at`,
-    sql<{ code: string; name: string; health: string; last_success_at: Date | null }[]>`select code, name, health, last_success_at from v_data_source_health where kind = 'worker' order by name`,
+    sql<{ code: string; name: string; health: string; last_success_at: Date | null; note: string | null }[]>`
+      select code, name, health, last_success_at,
+             case code
+               when 'cftc_cot' then (select 'raport z ' || to_char(max(report_date), 'DD.MM') from cot_reports)
+               when 'tradingview' then (select count(*) || ' wyników z 24 h' from economic_events where actual is not null and scheduled_at > now() - interval '24 hours')
+             end as note
+      from v_data_source_health where kind = 'worker' order by name`,
     sql<{ last4: string }[]>`select last4 from secrets where name = 'metaapi_token'`,
     sql<{ id: string; code: string; symbol: string; direction: string; volume_open: number; entry_price: number; current_sl: number | null; current_tp: number | null; unrealized_pnl: number; opened_at: Date }[]>`
       select t.id, a.code, t.symbol, t.direction, t.volume_open, t.entry_price, t.current_sl, t.current_tp, t.unrealized_pnl, t.opened_at
@@ -71,7 +77,7 @@ export default async function Overview({ searchParams }: { searchParams: Promise
                 value={<>{a.status}{a.beat && <span className="text-muted"> · {ago(a.beat)}{a.latency_ms !== null ? ` · ${a.latency_ms} ms` : ""}</span>}</>} />
             ))}
             {sources.map((s) => (
-              <Row key={s.code} label={s.name} ok={s.health === "ok"} warn={s.health === "stale" || s.health === "never"} value={<>{s.health} <span className="text-muted">· {ago(s.last_success_at)}</span></>} />
+              <Row key={s.code} label={s.name} ok={s.health === "ok"} warn={s.health === "stale" || s.health === "never"} value={<>{s.health} <span className="text-muted">· {ago(s.last_success_at)}{s.note ? ` · ${s.note}` : ""}</span></>} />
             ))}
           </div>
         </Card>

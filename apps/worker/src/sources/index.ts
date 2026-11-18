@@ -1,10 +1,12 @@
 import type { Ctx } from "../context.js";
 import { fetchCot } from "./cftc.js";
 import { fetchForexFactory } from "./forexfactory.js";
+import { fillActuals } from "./tradingview.js";
 
 const runners: Record<string, (ctx: Ctx) => Promise<number>> = {
   forexfactory: fetchForexFactory,
   cftc_cot: (ctx) => fetchCot(ctx),
+  tradingview: fillActuals,
 };
 
 /** Runs a built-in source and records success/failure on data_sources. */

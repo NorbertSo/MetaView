@@ -2,7 +2,7 @@ import { openPositionRisk } from "@tv/core";
 import type { Ctx } from "../context.js";
 import { systemEvent } from "../events.js";
 import type { Deal, MetaApiManager, Position } from "../metaapi/manager.js";
-import { getSpec, recordSpread, type AccountRef } from "../metaapi/instruments.js";
+import { getSpec, recordSpread, sampleWatchlist, type AccountRef } from "../metaapi/instruments.js";
 import { closeAllForAgent, recordOpenedTrade } from "./execution.js";
 import { notify } from "../telegram.js";
 import { getSetting } from "../settings.js";
@@ -139,20 +139,8 @@ export async function syncAccount(ctx: Ctx, mt: MetaApiManager, acc: AccountRow)
     for (const t of stillOpen) await applyDeals(ctx, t, deals.filter((d) => d.positionId === t.position_id));
   }
 
-  // Periodic spread samples for every instrument an active agent trades on this account.
-  const symbols = await ctx.sql<{ symbol: string }[]>`
-    select distinct unnest(instruments) as symbol from agents where mt_account_id = ${acc.id} and status = 'active'`;
-  for (const { symbol } of symbols) {
-    if (now - (lastSnapshot.get(`spread:${acc.id}:${symbol}`) ?? 0) < 15 * 60_000) continue;
-    try {
-      const spec = await getSpec(ctx, mt, acc, symbol);
-      const q = await mt.symbolPrice(id, symbol);
-      await recordSpread(ctx, acc.server, symbol, q.bid, q.ask, spec.point, "periodic");
-      lastSnapshot.set(`spread:${acc.id}:${symbol}`, now);
-    } catch (err) {
-      ctx.log.debug({ err, symbol }, "spread sample failed");
-    }
-  }
+  // Quotes, spread samples, swaps and margin for the whole watchlist (not only what agents trade).
+  await sampleWatchlist(ctx, mt, acc);
 
   await agentEquityAndKill(ctx, mt, acc, agents);
 }

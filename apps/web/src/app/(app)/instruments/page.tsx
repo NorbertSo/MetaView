@@ -4,6 +4,8 @@ import { fmtNum, fmtPct, fmtSigned } from "@/lib/format";
 import { GROUPS, groupLabel, groupOf, instrumentHref, metrics, subclassLabel, sumAgg, type GroupKey, type InstrumentAgg } from "@/lib/instruments";
 import { Card, Empty, PageHeader, Stat, Tabs } from "@/components/ui";
 import { StatsTable, type StatsRow } from "@/components/instrument-table";
+import { CostsTable } from "@/components/costs-table";
+import { costRows } from "@/lib/cost-data";
 
 export const dynamic = "force-dynamic";
 
@@ -12,12 +14,14 @@ type Row = InstrumentAgg & {
   agents: number; strategies: number; max_drawdown: number; last_trade_at: Date | null;
 };
 
-export default async function InstrumentsPage({ searchParams }: { searchParams: Promise<{ group?: string; traded?: string }> }) {
+export default async function InstrumentsPage({ searchParams }: { searchParams: Promise<{ group?: string; traded?: string; view?: string }> }) {
   const sp = await searchParams;
   const sql = db();
-  const [all, [ccyRow]] = await Promise.all([
+  const view = sp.view === "costs" ? "costs" : "results";
+  const [all, [ccyRow], costs] = await Promise.all([
     sql<Row[]>`select * from v_instrument_stats order by trades_total desc, symbol`,
     sql<{ currency: string | null }[]>`select currency from mt_accounts where status <> 'archived' order by created_at limit 1`,
+    view === "costs" ? costRows() : Promise.resolve([]),
   ]);
   const ccy = ccyRow?.currency ?? "";
 
@@ -29,7 +33,8 @@ export default async function InstrumentsPage({ searchParams }: { searchParams: 
 
   const present = new Set(visible.map((r) => groupOf(r.asset_class)));
   const groupKeys: GroupKey[] = [...GROUPS.map((g) => g.key), "other"].filter((k) => present.has(k as GroupKey)) as GroupKey[];
-  const qs = (g: string, t: boolean) => `/instruments?${new URLSearchParams({ ...(g !== "all" ? { group: g } : {}), ...(t ? { traded: "1" } : {}) })}`;
+  const qs = (g: string, t: boolean, v: string = view) =>
+    `/instruments?${new URLSearchParams({ ...(v === "costs" ? { view: "costs" } : {}), ...(g !== "all" ? { group: g } : {}), ...(t ? { traded: "1" } : {}) })}`;
   const tabs = [
     { key: "all", label: `Wszystkie (${visible.length})`, href: qs("all", tradedOnly) },
     ...groupKeys.map((k) => ({ key: k, label: `${groupLabel(k)} (${visible.filter((r) => groupOf(r.asset_class) === k).length})`, href: qs(k, tradedOnly) })),
@@ -59,6 +64,24 @@ export default async function InstrumentsPage({ searchParams }: { searchParams: 
     <>
       <PageHeader title="Walory" subtitle={<>Wszystkie instrumenty z konta MT i wyniki na każdym z nich, łącznie dla wszystkich agentów i strategii. Kwoty w walucie konta{ccy ? ` (${ccy})` : ""}. Skuteczność i wynik liczone z zamkniętych transakcji, po kosztach.</>} />
 
+      <div className="flex gap-2 mb-5">
+        <Link href={qs(group, tradedOnly, "results")} className={`btn ${view === "results" ? "btn-primary" : ""}`}>Wyniki i skuteczność</Link>
+        <Link href={qs(group, tradedOnly, "costs")} className={`btn ${view === "costs" ? "btn-primary" : ""}`}>Koszty: spread, swap, depozyt</Link>
+      </div>
+
+      {view === "costs" ? (
+        <>
+          <Tabs items={tabs} current={group} />
+          <Card bodyClass="">
+            <CostsTable rows={costs.filter((c) => rows.some((r) => r.symbol === c.symbol))} ccy={ccy} />
+          </Card>
+          <p className="text-xs text-muted mt-2">
+            Kwoty w {ccy || "walucie konta"} na 1 lot. Spread: próbki co 10 minut w godzinach handlu (mediana i 90. percentyl z 7 dni) — pierwsze sensowne wartości po kilku godzinach zbierania.
+            Swap: stawka brokera przeliczona na jedną noc; ujemny = płacisz, dodatni = dostajesz. W dniu potrójnego swapu naliczane są 3 noce (weekend).
+            Depozyt liczy broker dla 1 lota po bieżącej cenie. Prowizja pochodzi z faktycznie zamkniętych transakcji. Szczegóły i spread wg godzin — na stronie waloru.
+          </p>
+        </>
+      ) : (<>
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
         <Stat label="Transakcje" value={totalAll.trades_total} hint={`${totalAll.closed_trades} zamkniętych · ${totalAll.open_trades} otwartych · ${traded.length} walorów`} />
         <Stat label="Skuteczność" value={fmtPct(mAll.winRate, 1)} hint={`${totalAll.wins} zysków / ${totalAll.losses} strat`} tone={mAll.winRate === null ? undefined : mAll.winRate >= 50 ? "good" : undefined} />
@@ -83,6 +106,7 @@ export default async function InstrumentsPage({ searchParams }: { searchParams: 
         )}
       </Card>
       <p className="text-xs text-muted mt-2">Wyszarzone wiersze: walor dostępny, ale bez transakcji. Akcje pojawiają się tu dopiero po pierwszej transakcji. Maks. DD — największe obsunięcie krzywej wyniku zamkniętych transakcji na danym walorze.</p>
+      </>)}
     </>
   );
 }
