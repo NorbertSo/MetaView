@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatFigure, matchEvents, titleSimilarity, type CalendarEvent } from "../src/event-match.js";
+import { formatFigure, matchEvents, titleSimilarity, toUnit, type CalendarEvent } from "../src/event-match.js";
 
 const at = (iso: string) => new Date(iso);
 const ev = (title: string, currency: string, time: string, forecast: number | null, previous: number | null): CalendarEvent =>
@@ -53,5 +53,13 @@ describe("event matching (ForexFactory ↔ TradingView)", () => {
     expect(formatFigure(0.2, "%", null)).toBe("0.2%");
     expect(formatFigure(25.5, null, "K")).toBe("25.5K");
     expect(formatFigure(-39.3, null, "K")).toBe("-39.3K");
+  });
+
+  it("converts scale to the row's unit", () => {
+    expect(toUnit(-2.77, null, "B", "M")).toEqual({ value: -2770, raw: "-2770M" });
+    expect(toUnit(1.295, null, "M", "M")).toEqual({ value: 1.295, raw: "1.295M" });
+    expect(toUnit(0.2, "%", null, "%")).toEqual({ value: 0.2, raw: "0.2%" });
+    expect(toUnit(23750, null, null, "K")).toEqual({ value: 23.75, raw: "23.75K" });
+    expect(toUnit(-476.5, null, "B", "T")).toEqual({ value: -0.4765, raw: "-0.4765T" });
   });
 });

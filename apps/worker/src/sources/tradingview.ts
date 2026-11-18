@@ -1,4 +1,4 @@
-import { formatFigure, matchEvents, type CalendarEvent } from "@tv/core";
+import { matchEvents, toUnit, type CalendarEvent } from "@tv/core";
 import type { Ctx } from "../context.js";
 
 /**
@@ -14,12 +14,12 @@ interface TvEvent {
   unit?: string | null; scale?: string | null;
 }
 
-interface PendingRow { id: string; scheduled_at: Date; currency: string | null; title: string; forecast: number | null; previous: number | null }
+interface PendingRow { id: string; scheduled_at: Date; currency: string | null; title: string; forecast: number | null; previous: number | null; unit: string | null }
 
 /** Fills missing actuals for events released in the last 36 hours. Returns the number of events updated. */
 export async function fillActuals(ctx: Ctx): Promise<number> {
   const pending = await ctx.sql<PendingRow[]>`
-    select id, scheduled_at, currency, title, forecast, previous from economic_events
+    select id, scheduled_at, currency, title, forecast, previous, unit from economic_events
     where actual is null and importance <> 'holiday'
       and scheduled_at between now() - interval '36 hours' and now() + interval '1 minute'`;
   if (pending.length === 0) return 0;
@@ -43,9 +43,9 @@ export async function fillActuals(ctx: Ctx): Promise<number> {
   let n = 0;
   for (const [ti, ci] of matches) {
     const row = pending[ti]!, tv = released[ci]!;
-    const raw = formatFigure(tv.actual as number, tv.unit ?? null, tv.scale ?? null);
+    const { value, raw } = toUnit(tv.actual as number, tv.unit ?? null, tv.scale ?? null, row.unit);
     const updated = await ctx.sql`
-      update economic_events set actual = ${tv.actual}, actual_raw = ${raw}, published_at = coalesce(published_at, now())
+      update economic_events set actual = ${value}, actual_raw = ${raw}, published_at = coalesce(published_at, now())
       where id = ${row.id} and actual is null`;
     n += updated.count;
   }

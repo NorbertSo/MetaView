@@ -80,3 +80,21 @@ export function formatFigure(value: number, unit: string | null, scale: string |
   const v = Number(value.toFixed(6)).toString();
   return `${v}${unit === "%" ? "%" : ""}${scale ?? ""}`;
 }
+
+const SCALE: Record<string, number> = { K: 1e3, M: 1e6, B: 1e9, T: 1e12 };
+
+/**
+ * Converts a figure published with `scale` (TradingView: "K", "M", "B") into the scale our row already
+ * uses (ForexFactory unit from forecast/previous), so `actual - forecast` stays meaningful.
+ * Returns the value and the raw label in the target scale.
+ */
+export function toUnit(value: number, unit: string | null, scale: string | null, targetUnit: string | null): { value: number; raw: string } {
+  // An unscaled large number (e.g. 23750) against a "K" row is a plain count.
+  const from = scale ? SCALE[scale.toUpperCase()] : Math.abs(value) >= 1000 ? 1 : undefined;
+  const to = targetUnit ? SCALE[targetUnit.toUpperCase()] : undefined;
+  if (from !== undefined && to && from !== to) {
+    const v = Number(((value * from) / to).toPrecision(6));
+    return { value: v, raw: `${v}${targetUnit!.toUpperCase()}` };
+  }
+  return { value, raw: formatFigure(value, unit, scale) };
+}
