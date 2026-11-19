@@ -31,7 +31,7 @@ export default async function DecisionsPage({ searchParams }: { searchParams: Pr
       <form className="card p-4 mb-4 flex flex-wrap gap-3 items-end">
         <label><span className="label">Agent</span><select name="agent" defaultValue={agent ?? ""} className="input"><option value="">wszyscy</option>{agents.map((a) => <option key={a.id} value={a.id}>{a.code}</option>)}</select></label>
         <label><span className="label">Akcja</span><select name="action" defaultValue={action ?? ""} className="input"><option value="">wszystkie</option>
-          {["open_long", "open_short", "add", "modify_position", "partial_close", "close", "hold", "skip"].map((x) => <option key={x}>{x}</option>)}</select></label>
+          {["open_long", "open_short", "add", "modify_position", "partial_close", "close", "cancel_order", "hold", "skip"].map((x) => <option key={x}>{x}</option>)}</select></label>
         <label><span className="label">Status</span><select name="status" defaultValue={status ?? ""} className="input"><option value="">wszystkie</option>
           {["recorded", "rejected_risk", "submitted", "executed", "failed"].map((x) => <option key={x}>{x}</option>)}</select></label>
         <button className="btn">Filtruj</button>

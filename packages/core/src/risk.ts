@@ -2,7 +2,7 @@ import { floorToStep, round2 } from "./numbers.js";
 
 export type Direction = "long" | "short";
 export type ActionKind =
-  | "open_long" | "open_short" | "modify_position" | "add" | "partial_close" | "close" | "hold" | "skip";
+  | "open_long" | "open_short" | "modify_position" | "add" | "partial_close" | "close" | "cancel_order" | "hold" | "skip";
 
 export interface SymbolSpec {
   symbol: string;
@@ -130,6 +130,9 @@ export interface OpenIntent {
   spec: SymbolSpec;
   quote: Quote;
   medianSpreadPoints: number | null;
+  /** Pending entry: stop/limit order at `entryPrice`. Absent = market order. */
+  entryType?: "market" | "stop" | "limit";
+  entryPrice?: number | null;
 }
 
 export interface ModifyIntent {
@@ -215,11 +218,25 @@ export function evaluateRisk(ctx: RiskContext, intent: Intent): RiskEvaluation {
   gates.push(a.instruments.includes(symbol) ? pass("instrument_allowed", symbol) : fail("instrument_allowed", `${symbol} is not in the agent's instrument list`));
   gates.push(probability >= 0 && probability <= 1 ? pass("probability_range", String(probability)) : fail("probability_range", `probability ${probability} outside 0..1`));
 
-  const entry = marketEntry(direction, quote);
+  const pendingType = intent.entryType === "stop" || intent.entryType === "limit" ? intent.entryType : null;
+  const mkt = marketEntry(direction, quote);
+  const entry = pendingType && intent.entryPrice ? intent.entryPrice : mkt;
+  if (pendingType) {
+    // Buy stop above / sell stop below the market; buy limit below / sell limit above.
+    const above = entry > mkt, below = entry < mkt;
+    const ok = pendingType === "stop" ? (direction === "long" ? above : below) : (direction === "long" ? below : above);
+    gates.push(ok
+      ? pass("pending_price_side", `${pendingType} ${direction} @ ${entry} vs market ${mkt}`)
+      : fail("pending_price_side", `${pendingType} ${direction} @ ${entry} is on the wrong side of market ${mkt}`));
+    const distPts = Math.abs(entry - mkt) / spec.point;
+    gates.push(distPts >= spec.stopsLevelPoints
+      ? pass("pending_stops_level", `${distPts.toFixed(1)} pts >= ${spec.stopsLevelPoints}`)
+      : fail("pending_stops_level", `order ${distPts.toFixed(1)} pts from price, broker minimum ${spec.stopsLevelPoints}`));
+  }
   const slOk = direction === "long" ? stopLoss < entry : stopLoss > entry;
   gates.push(slOk ? pass("sl_side", `SL ${stopLoss} vs entry ${entry}`) : fail("sl_side", `SL ${stopLoss} is on the wrong side of entry ${entry}`));
 
-  const stopRef = direction === "long" ? quote.bid : quote.ask;
+  const stopRef = pendingType ? entry : direction === "long" ? quote.bid : quote.ask;
   const slDistPts = Math.abs(stopRef - stopLoss) / spec.point;
   gates.push(slDistPts >= spec.stopsLevelPoints
     ? pass("stops_level", `${slDistPts.toFixed(1)} pts >= ${spec.stopsLevelPoints}`)

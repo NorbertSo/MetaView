@@ -183,3 +183,46 @@ describe("cron & pricing", () => {
       { inputTokens: 10_000, outputTokens: 1_000, cacheReadTokens: 50_000, cacheWriteTokens: 0 })).toBe(0.07);
   });
 });
+
+describe("pending entries", () => {
+  it("buy stop above market sizes from the order price", () => {
+    const r = evaluateRisk(ctx(), { ...openLong(1.1000, null), entryType: "stop" as const, entryPrice: 1.1010 });
+    expect(r.passed).toBe(true);
+    expect(r.entry).toBe(1.1010);
+    expect(r.sizing!.volume).toBe(1); // 100 ticks from 1.1010 to 1.1000
+  });
+  it("rejects a buy stop below market and a buy limit above market", () => {
+    const s = evaluateRisk(ctx(), { ...openLong(1.0990, null), entryType: "stop" as const, entryPrice: 1.0995 });
+    expect(s.gates.find((g) => g.gate === "pending_price_side")!.passed).toBe(false);
+    const l = evaluateRisk(ctx(), { ...openLong(1.0990, null), entryType: "limit" as const, entryPrice: 1.1020 });
+    expect(l.gates.find((g) => g.gate === "pending_price_side")!.passed).toBe(false);
+  });
+});
+
+import { clusterZones, pivots, orbSetup, zonedToUtc } from "../src/setups.js";
+describe("setups", () => {
+  it("zonedToUtc handles DST", () => {
+    expect(new Date(zonedToUtc("2026-07-01", "09:00", "Europe/Berlin")).toISOString()).toBe("2026-07-01T07:00:00.000Z");
+    expect(new Date(zonedToUtc("2026-12-01", "09:00", "Europe/Berlin")).toISOString()).toBe("2026-12-01T08:00:00.000Z");
+  });
+  it("clusters mixed pivots into a zone", () => {
+    const bars = Array.from({ length: 60 }, (_, i) => {
+      const x = 100 + 5 * Math.sin(i / 3);
+      return { t: i * 3_600_000, o: x, h: x + 0.2, l: x - 0.2, c: x };
+    });
+    const piv = pivots(bars, 2);
+    expect(piv.length).toBeGreaterThan(4);
+    const z = clusterZones(piv.map((p) => ({ ...p, price: 100 + (p.price - 100) * 0.001 })), 60, 60, 0.01, 4, 10);
+    expect(z.length).toBeGreaterThan(0);
+  });
+  it("orb setup suggests a trend-side stop after the range", () => {
+    const day = "2026-11-18", open = zonedToUtc(day, "09:00", "Europe/Berlin");
+    const h1 = Array.from({ length: 1000 }, (_, i) => { const t = open - (1000 - i) * 3_600_000; const x = 20000 + i * 0.5; return { t, o: x, h: x + 5 + i * 0.05, l: x - 5, c: x + 1 }; });
+    const m5 = Array.from({ length: 12 }, (_, i) => ({ t: open + i * 300_000, o: 20600, h: 20610, l: 20590, c: 20600 }));
+    const s = orbSetup(open + 61 * 60_000, m5, h1, { tz: "Europe/Berlin", open: "09:00", close: "17:30", rangeMinutes: 60, entryWindowMinutes: 240, smaDays: 20, maxDays: 5 });
+    expect(s.status).toBe("entry_window");
+    expect(s.trend_d1).toBe("up");
+    expect(s.suggested_order?.entry_price).toBe(20610);
+    expect(s.suggested_order?.stop_loss).toBe(20590);
+  });
+});

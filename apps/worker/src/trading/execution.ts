@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { floorToStep, openPositionRisk, type SymbolSpec } from "@tv/core";
 import type { Ctx } from "../context.js";
 import { systemEvent } from "../events.js";
-import { TradeRejected, type MetaApiManager } from "../metaapi/manager.js";
+import { TradeRejected, type MetaApiManager, type PendingOrderType } from "../metaapi/manager.js";
 import { getSpec, type AccountRef } from "../metaapi/instruments.js";
 
 export type Initiator = "agent" | "kill_switch" | "manual" | "system";
@@ -16,16 +16,18 @@ export function newClientId(agentCode: string): string {
 
 interface OrderInsert {
   decisionId: string | null; agent: AgentRef | null; acc: AccountRef; clientId: string; symbol: string;
-  side: "buy" | "sell" | null; kind: "market" | "modify" | "close" | "close_partial"; volume: number | null;
+  side: "buy" | "sell" | null; kind: "market" | "modify" | "close" | "close_partial" | "pending" | "cancel"; volume: number | null;
   requestedPrice: number | null; sl: number | null; tp: number | null; positionId: string | null; initiatedBy: Initiator;
+  orderType?: PendingOrderType | null; expiresAt?: Date | null; plannedRisk?: number | null;
 }
 
 async function insertOrder(ctx: Ctx, o: OrderInsert): Promise<string> {
   const [row] = await ctx.sql<{ id: string }[]>`
     insert into orders (decision_id, agent_id, mt_account_id, client_id, magic, symbol, side, order_kind, volume,
-                        requested_price, stop_loss, take_profit, position_id, initiated_by)
+                        requested_price, stop_loss, take_profit, position_id, initiated_by, order_type, expires_at, planned_risk)
     values (${o.decisionId}, ${o.agent?.id ?? null}, ${o.acc.id}, ${o.clientId}, ${o.agent?.magic ?? null}, ${o.symbol},
-            ${o.side}, ${o.kind}, ${o.volume}, ${o.requestedPrice}, ${o.sl}, ${o.tp}, ${o.positionId}, ${o.initiatedBy})
+            ${o.side}, ${o.kind}, ${o.volume}, ${o.requestedPrice}, ${o.sl}, ${o.tp}, ${o.positionId}, ${o.initiatedBy},
+            ${o.orderType ?? null}, ${o.expiresAt ?? null}, ${o.plannedRisk ?? null})
     returning id`;
   return row!.id;
 }
@@ -88,6 +90,57 @@ export async function openPosition(ctx: Ctx, mt: MetaApiManager, r: OpenRequest)
     fallbackRisk: r.plannedRisk, riskPctBase: r.riskPct, orderId,
   });
   return { ok: true, tradeId };
+}
+
+export interface PendingRequest extends OpenRequest { entryType: "stop" | "limit"; expiresAt: Date }
+
+/**
+ * Places a pending stop/limit entry. The fill shows up as a position carrying our
+ * clientId and the agent's magic; the sync loop adopts it and links the decision.
+ */
+export async function placePending(ctx: Ctx, mt: MetaApiManager, r: PendingRequest): Promise<{ ok: boolean; orderId?: string; error?: string }> {
+  const clientId = newClientId(r.agent.code);
+  const side = r.direction === "long" ? "buy" : "sell";
+  const orderType = `${side}_${r.entryType}` as PendingOrderType;
+  const orderId = await insertOrder(ctx, {
+    decisionId: r.decisionId, agent: r.agent, acc: r.acc, clientId, symbol: r.symbol, side, kind: "pending",
+    volume: r.volume, requestedPrice: r.requestedPrice, sl: r.sl, tp: r.tp, positionId: null, initiatedBy: "agent",
+    orderType, expiresAt: r.expiresAt, plannedRisk: r.plannedRisk,
+  });
+  const started = Date.now();
+  try {
+    const res = await mt.pendingOrder(r.acc.metaapi_account_id, orderType, r.symbol, r.volume, r.requestedPrice, r.sl, r.tp, r.expiresAt,
+      { clientId, magic: r.agent.magic });
+    await finishOrder(ctx, orderId, started, { ok: true, orderId: res.orderId, positionId: "", code: res.stringCode });
+    await ctx.sql`update orders set pending_state = 'placed' where id = ${orderId}`;
+    return { ok: true, orderId };
+  } catch (err) {
+    const f = failure(err);
+    await finishOrder(ctx, orderId, started, f);
+    return { ok: false, error: f.error };
+  }
+}
+
+export interface PendingRow { id: string; broker_order_id: string; symbol: string; agent_id: string }
+
+/** Cancels a live pending order of an agent. */
+export async function cancelPending(ctx: Ctx, mt: MetaApiManager, acc: AccountRef, agent: AgentRef, decisionId: string | null,
+  order: PendingRow, initiatedBy: Initiator): Promise<{ ok: boolean; error?: string }> {
+  const cancelId = await insertOrder(ctx, {
+    decisionId, agent, acc, clientId: newClientId(agent.code), symbol: order.symbol, side: null, kind: "cancel",
+    volume: null, requestedPrice: null, sl: null, tp: null, positionId: null, initiatedBy,
+  });
+  const started = Date.now();
+  try {
+    const res = await mt.cancelOrder(acc.metaapi_account_id, order.broker_order_id);
+    await finishOrder(ctx, cancelId, started, { ok: true, orderId: res.orderId, positionId: "", code: res.stringCode });
+    await ctx.sql`update orders set pending_state = 'cancelled', pending_closed_at = now() where id = ${order.id} and pending_state = 'placed'`;
+    return { ok: true };
+  } catch (err) {
+    const f = failure(err);
+    await finishOrder(ctx, cancelId, started, f);
+    return { ok: false, error: f.error };
+  }
 }
 
 export interface OpenedTrade {
@@ -206,6 +259,15 @@ export async function closeAllForAgent(ctx: Ctx, mt: MetaApiManager, agentId: st
     where t.agent_id = ${agentId} and t.status = 'open'`;
   let closed = 0;
   const failed: string[] = [];
+  const pend = await ctx.sql<(PendingRow & { code: string; magic: number; acc_id: string; metaapi_account_id: string; server: string })[]>`
+    select o.id, o.broker_order_id, o.symbol, o.agent_id, a.code, a.magic, m.id as acc_id, m.metaapi_account_id, m.server
+    from orders o join agents a on a.id = o.agent_id join mt_accounts m on m.id = o.mt_account_id
+    where o.agent_id = ${agentId} and o.pending_state = 'placed' and o.broker_order_id is not null`;
+  for (const o of pend) {
+    const res = await cancelPending(ctx, mt, { id: o.acc_id, metaapi_account_id: o.metaapi_account_id, server: o.server },
+      { id: agentId, code: o.code, magic: o.magic }, null, o, initiatedBy);
+    if (!res.ok) failed.push(`order ${o.symbol} #${o.broker_order_id}: ${res.error}`);
+  }
   for (const t of rows) {
     const res = await closeTrade(ctx, mt, { id: t.acc_id, metaapi_account_id: t.metaapi_account_id, server: t.server },
       { id: agentId, code: t.code, magic: t.magic }, null, t, 1, initiatedBy);

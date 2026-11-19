@@ -9,7 +9,7 @@ import type { MetaApiManager } from "../metaapi/manager.js";
 import { getSpec, medianSpread, type AccountRef } from "../metaapi/instruments.js";
 import { getSetting } from "../settings.js";
 import { notify } from "../telegram.js";
-import { closeTrade, modifyTrade, openPosition, type AgentRef, type TradeRow } from "../trading/execution.js";
+import { cancelPending, closeTrade, modifyTrade, openPosition, placePending, type AgentRef, type PendingRow, type TradeRow } from "../trading/execution.js";
 import { buildContext, loadAgent, type AgentFull, type BuiltContext } from "./context-builder.js";
 import { buildSystemPrompt, PROTOCOL_VERSION } from "./prompt.js";
 
@@ -108,6 +108,14 @@ async function riskContext(ctx: Ctx, mt: MetaApiManager, a: AgentFull, b: BuiltC
       riskAmount: openPositionRisk(t.direction, t.entry_price, t.current_sl, t.volume_open, spec, q.lossTickValue, t.risk_amount),
     });
   }
+  // Live pending orders count as open risk (at their planned risk) until they fill or end.
+  const pend = await ctx.sql<{ agent_id: string; symbol: string; side: string; planned_risk: number | null }[]>`
+    select agent_id, symbol, side, planned_risk from orders where mt_account_id = ${a.acc_id} and pending_state = 'placed'`;
+  for (const o of pend) {
+    const spec = await getSpec(ctx, mt, acc, o.symbol);
+    openPositions.push({ agentId: o.agent_id, symbol: o.symbol, direction: o.side === "buy" ? "long" : "short",
+      currencies: symbolCurrencies(spec), riskAmount: Number(o.planned_risk ?? 0) });
+  }
   const events = await ctx.sql<{ scheduled_at: Date; currency: string | null; importance: "low" | "medium" | "high" | "holiday"; title: string }[]>`
     select scheduled_at, currency, importance, title from economic_events
     where scheduled_at between now() - interval '2 hours' and now() + interval '2 hours'`;
@@ -146,10 +154,22 @@ async function handleDecision(ctx: Ctx, mt: MetaApiManager, a: AgentFull, runId:
       if (!trade || trade.status !== "open") targetError = `position ${d.position_ref} is no longer open`;
     }
   }
+  let pendingOrder: PendingRow | null = null;
+  if (d.action === "cancel_order") {
+    const orderId = d.order_ref ? b.ordersByRef.get(d.order_ref) : undefined;
+    if (!orderId) targetError = `unknown order_ref ${d.order_ref}`;
+    else {
+      const [o] = await ctx.sql<(PendingRow & { pending_state: string })[]>`
+        select id, broker_order_id, symbol, agent_id, pending_state from orders where id = ${orderId} and agent_id = ${a.id}`;
+      if (!o || o.pending_state !== "placed") targetError = `order ${d.order_ref} is no longer pending`;
+      else pendingOrder = o;
+    }
+  }
+  const pendingEntry = (d.entry_type === "stop" || d.entry_type === "limit") ? d.entry_type : null;
   if (d.action === "add" && trade && d.symbol && d.symbol !== trade.symbol) targetError = `add symbol ${d.symbol} differs from position ${trade.symbol}`;
 
   const snapshotRef = { run_id: runId, llm_call_id: llmCallId, market_view: marketView };
-  const symbol = d.symbol ?? trade?.symbol ?? null;
+  const symbol = d.symbol ?? trade?.symbol ?? pendingOrder?.symbol ?? (d.action === "cancel_order" ? `order:${d.order_ref ?? "?"}` : null);
 
   // Build the risk intent.
   let evaluation: RiskEvaluation | null = null;
@@ -161,6 +181,7 @@ async function handleDecision(ctx: Ctx, mt: MetaApiManager, a: AgentFull, runId:
     const intent: Intent = {
       kind: "open", action: d.action, symbol: symbol!, direction, stopLoss: d.stop_loss!, takeProfit: d.take_profit,
       probability: d.probability!, spec, quote, medianSpreadPoints: await medianSpread(ctx, a.server, symbol!),
+      entryType: pendingEntry ?? "market", entryPrice: pendingEntry ? d.entry_price : null,
     };
     evaluation = evaluateRisk(await riskContext(ctx, mt, a, b), intent);
   } else if (!intentError && d.action === "modify_position") {
@@ -170,7 +191,7 @@ async function handleDecision(ctx: Ctx, mt: MetaApiManager, a: AgentFull, runId:
       kind: "modify", direction: trade!.direction, symbol: trade!.symbol, currentSl: trade!.current_sl,
       newSl: d.stop_loss, newTp: d.take_profit, spec, quote,
     });
-  } else if (!intentError && (d.action === "close" || d.action === "partial_close")) {
+  } else if (!intentError && (d.action === "close" || d.action === "partial_close" || d.action === "cancel_order")) {
     evaluation = evaluateRisk(await riskContext(ctx, mt, a, b), { kind: "reduce" });
   }
 
@@ -184,13 +205,15 @@ async function handleDecision(ctx: Ctx, mt: MetaApiManager, a: AgentFull, runId:
   const [dec] = await ctx.sql<{ id: string }[]>`
     insert into decisions (run_id, agent_id, strategy_version_id, model_id, mt_account_id, symbol, action, target_trade_id,
                            probability, expected_r, entry_price, stop_loss, take_profit, close_fraction, volume, rationale,
-                           factors, context_snapshot, brief_id, lessons_used, risk_check, risk_passed, status, error)
+                           factors, context_snapshot, brief_id, lessons_used, risk_check, risk_passed, status, error,
+                           entry_type, target_order_id)
     values (${runId}, ${a.id}, ${a.strategy_version_id}, ${a.model_id}, ${a.acc_id}, ${symbol}, ${d.action},
             ${trade?.id ?? null}, ${d.probability}, ${d.expected_r}, ${evaluation?.entry ?? null}, ${d.stop_loss}, ${d.take_profit},
             ${d.action === "partial_close" ? d.close_fraction : d.action === "close" ? 1 : null},
             ${evaluation?.sizing?.volume ?? null}, ${d.rationale}, ${d.factors},
             ${ctx.sql.json({ ...b.json, _ref: snapshotRef } as never)}, ${b.briefId}, ${b.lessonIds},
-            ${riskCheck ? ctx.sql.json(riskCheck as never) : null}, ${riskCheck ? passed : null}, ${status}, ${intentError})
+            ${riskCheck ? ctx.sql.json(riskCheck as never) : null}, ${riskCheck ? passed : null}, ${status}, ${intentError},
+            ${pendingEntry ?? "market"}, ${pendingOrder?.id ?? null})
     returning id`;
   const decisionId = dec!.id;
 
@@ -203,7 +226,16 @@ async function handleDecision(ctx: Ctx, mt: MetaApiManager, a: AgentFull, runId:
   }
 
   let outcome: { ok: boolean; error?: string };
-  if (d.action === "open_long" || d.action === "open_short" || d.action === "add") {
+  if (pendingEntry && (d.action === "open_long" || d.action === "open_short" || d.action === "add")) {
+    const direction = d.action === "add" ? trade!.direction : d.action === "open_long" ? "long" : "short";
+    outcome = await placePending(ctx, mt, {
+      acc, agent: agentRef, decisionId, symbol: symbol!, direction, volume: evaluation!.sizing!.volume,
+      requestedPrice: d.entry_price!, sl: d.stop_loss!, tp: d.take_profit, plannedRisk: evaluation!.sizing!.riskAmount,
+      riskPct: a.risk_per_trade_pct, entryType: pendingEntry, expiresAt: new Date(Date.now() + d.expiry_minutes! * 60_000),
+    });
+  } else if (d.action === "cancel_order") {
+    outcome = await cancelPending(ctx, mt, acc, agentRef, decisionId, pendingOrder!, "agent");
+  } else if (d.action === "open_long" || d.action === "open_short" || d.action === "add") {
     const direction = d.action === "add" ? trade!.direction : d.action === "open_long" ? "long" : "short";
     outcome = await openPosition(ctx, mt, {
       acc, agent: agentRef, decisionId, symbol: symbol!, direction, volume: evaluation!.sizing!.volume,

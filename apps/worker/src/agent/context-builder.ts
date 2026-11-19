@@ -1,6 +1,7 @@
 import type { Ctx } from "../context.js";
 import type { MetaApiManager } from "../metaapi/manager.js";
 import { getSpec, recordSpread, type AccountRef } from "../metaapi/instruments.js";
+import { computeSetups, type SetupParams } from "./setups.js";
 
 export interface AgentFull {
   id: string; code: string; name: string; magic: number; status: string; instruments: string[];
@@ -8,7 +9,7 @@ export interface AgentFull {
   max_drawdown_pct: number; temperature: number;
   strategy_id: string; strategy_code: string; style: "swing" | "day" | "event" | "other";
   strategy_version_id: string; version: number; rules_md: string; system_prompt: string;
-  params: { candles?: Record<string, number>; news_hours?: number; events_hours_ahead?: number } & Record<string, unknown>;
+  params: { candles?: Record<string, number>; news_hours?: number; events_hours_ahead?: number; setups?: SetupParams } & Record<string, unknown>;
   timeframes: string[];
   model_id: string;
   acc_id: string; metaapi_account_id: string; server: string; account_type: "demo" | "real"; account_status: string;
@@ -36,6 +37,7 @@ export interface BuiltContext {
   lessonIds: string[];
   quotes: Map<string, { bid: number; ask: number; lossTickValue: number }>;
   positionsByRef: Map<string, string>; // position_ref -> trade id
+  ordersByRef: Map<string, string>;    // order_ref -> orders.id (live pending orders)
   equity: number;
   peakEquity: number;
   dayStartEquity: number;
@@ -75,6 +77,23 @@ export async function buildContext(ctx: Ctx, mt: MetaApiManager, a: AgentFull): 
       stop_loss: t.current_sl, take_profit: t.current_tp, unrealized_pnl: t.unrealized_pnl,
       r_now: Math.round((t.unrealized_pnl / t.risk_amount) * 100) / 100, opened_at: t.opened_at.toISOString(),
       open_rationale: t.rationale,
+    };
+  });
+
+  const pend = await ctx.sql<{ id: string; broker_order_id: string; symbol: string; side: string; order_type: string; requested_price: number;
+    stop_loss: number | null; take_profit: number | null; volume: number; expires_at: Date | null; created_at: Date; rationale: string | null }[]>`
+    select o.id, o.broker_order_id, o.symbol, o.side, o.order_type, o.requested_price, o.stop_loss, o.take_profit, o.volume,
+           o.expires_at, o.created_at, d.rationale
+    from orders o left join decisions d on d.id = o.decision_id
+    where o.agent_id = ${a.id} and o.pending_state = 'placed' order by o.created_at`;
+  const ordersByRef = new Map<string, string>();
+  const pendingOrders = pend.map((o) => {
+    const ref = `O${o.broker_order_id}`;
+    ordersByRef.set(ref, o.id);
+    return {
+      order_ref: ref, symbol: o.symbol, order_type: o.order_type, entry_price: o.requested_price, stop_loss: o.stop_loss,
+      take_profit: o.take_profit, volume: o.volume, placed_at: o.created_at.toISOString(),
+      expires_at: o.expires_at?.toISOString() ?? null, rationale: o.rationale,
     };
   });
 
@@ -129,6 +148,10 @@ export async function buildContext(ctx: Ctx, mt: MetaApiManager, a: AgentFull): 
   const lessons = await ctx.sql<{ id: string; body: string }[]>`
     select id, body from lessons where strategy_id = ${a.strategy_id} and status = 'approved' order by decided_at`;
 
+  const setups = a.params.setups
+    ? await computeSetups(mt, a.metaapi_account_id, a.params.setups, positions.map((p) => ({ position_ref: p.position_ref, symbol: p.symbol, opened_at: p.opened_at })), now.getTime())
+    : null;
+
   const json = {
     now_utc: now.toISOString(),
     agent: {
@@ -140,6 +163,8 @@ export async function buildContext(ctx: Ctx, mt: MetaApiManager, a: AgentFull): 
       max_open_positions: a.max_open_positions,
     },
     positions,
+    pending_orders: pendingOrders,
+    ...(setups ? { setups } : {}),
     market,
     market_brief: brief ? {
       created_at: brief.created_at.toISOString(), valid_until: brief.valid_until.toISOString(), regime: brief.regime,
@@ -154,5 +179,5 @@ export async function buildContext(ctx: Ctx, mt: MetaApiManager, a: AgentFull): 
     news: news.map((n) => ({ time_utc: n.published_at.toISOString(), source: n.source, title: n.title, summary: n.summary, importance: n.importance, instruments: n.instruments })),
     lessons: lessons.map((l) => l.body),
   };
-  return { json, briefId: brief?.id ?? null, lessonIds: lessons.map((l) => l.id), quotes, positionsByRef, equity, peakEquity, dayStartEquity };
+  return { json, briefId: brief?.id ?? null, lessonIds: lessons.map((l) => l.id), quotes, positionsByRef, ordersByRef, equity, peakEquity, dayStartEquity };
 }

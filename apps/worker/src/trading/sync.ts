@@ -127,6 +127,8 @@ export async function syncAccount(ctx: Ctx, mt: MetaApiManager, acc: AccountRow)
     await reconcileOpen(ctx, acc, trade, p);
   }
 
+  await reconcilePending(ctx, mt, acc);
+
   // Positions we track as open that the broker no longer has -> closed.
   for (const t of openTrades) {
     if (!seen.has(t.position_id)) await bookClosure(ctx, mt, acc, t);
@@ -143,6 +145,31 @@ export async function syncAccount(ctx: Ctx, mt: MetaApiManager, acc: AccountRow)
   await sampleWatchlist(ctx, mt, acc);
 
   await agentEquityAndKill(ctx, mt, acc, agents);
+}
+
+/** Pending orders we placed that left the broker's book: filled, cancelled or expired. */
+async function reconcilePending(ctx: Ctx, mt: MetaApiManager, acc: AccountRow): Promise<void> {
+  const placed = await ctx.sql<{ id: string; broker_order_id: string; created_at: Date; expires_at: Date | null }[]>`
+    select id, broker_order_id, created_at, expires_at from orders
+    where mt_account_id = ${acc.id} and pending_state = 'placed' and broker_order_id is not null`;
+  if (!placed.length) return;
+  const live = new Set((await mt.orders(acc.metaapi_account_id)).map((o) => o.id));
+  const gone = placed.filter((o) => !live.has(String(o.broker_order_id)));
+  if (!gone.length) return;
+  const from = new Date(Math.min(...gone.map((o) => o.created_at.getTime())) - 60_000);
+  const hist = new Map((await mt.historyOrders(acc.metaapi_account_id, from, new Date(Date.now() + 60_000))).map((o) => [o.id, o]));
+  for (const o of gone) {
+    const h = hist.get(String(o.broker_order_id));
+    // History can lag a few seconds behind the book; retry on the next sync unless clearly expired.
+    if (!h && !(o.expires_at && o.expires_at.getTime() < Date.now() - 10 * 60_000)) continue;
+    const state = !h ? "expired"
+      : h.state === "ORDER_STATE_FILLED" || h.state === "ORDER_STATE_PARTIAL" ? "filled"
+      : h.state === "ORDER_STATE_EXPIRED" ? "expired" : "cancelled";
+    await ctx.sql`
+      update orders set pending_state = ${state}, pending_closed_at = coalesce(${h?.doneTime ?? null}, now()),
+             position_id = coalesce(${h?.positionId ? String(h.positionId) : null}, position_id)
+      where id = ${o.id} and pending_state = 'placed'`;
+  }
 }
 
 async function adoptPosition(ctx: Ctx, mt: MetaApiManager, acc: AccountRow, agent: AgentRow, p: Position): Promise<OpenTradeRow | undefined> {

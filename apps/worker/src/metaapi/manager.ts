@@ -31,6 +31,11 @@ export interface TradeResponse { numericCode: number; stringCode: string; messag
 export interface Candle { time: Date; open: number; high: number; low: number; close: number; tickVolume: number }
 
 export interface TradeOptions { clientId: string; magic: number; comment?: string; slippage?: number }
+export interface PendingOrder {
+  id: string; type: string; state: string; magic: number; symbol: string; openPrice: number; volume: number;
+  stopLoss?: number; takeProfit?: number; clientId?: string; positionId?: string; time: Date; doneTime?: Date;
+}
+export type PendingOrderType = "buy_stop" | "sell_stop" | "buy_limit" | "sell_limit";
 
 /** Codes MetaApi returns for a successful trade request. */
 const OK_CODES = new Set(["TRADE_RETCODE_DONE", "TRADE_RETCODE_DONE_PARTIAL", "TRADE_RETCODE_PLACED", "TRADE_RETCODE_NO_CHANGES"]);
@@ -167,6 +172,41 @@ export class MetaApiManager {
         return this.check(res);
       } catch (e) { throw normalizeTradeError(e); }
     });
+  }
+
+  /** Places a pending stop/limit order that the broker cancels at `expiresAt`. */
+  async pendingOrder(id: string, type: PendingOrderType, symbol: string, volume: number, openPrice: number, sl: number,
+    tp: number | null, expiresAt: Date, o: TradeOptions): Promise<TradeResponse> {
+    return this.withConn(id, async (c) => {
+      const opts = { clientId: o.clientId, magic: o.magic, expiration: { type: "ORDER_TIME_SPECIFIED", time: expiresAt } };
+      const t = tp ?? undefined;
+      try {
+        const res: TradeResponse =
+          type === "buy_stop" ? await c.createStopBuyOrder(symbol, volume, openPrice, sl, t, opts)
+          : type === "sell_stop" ? await c.createStopSellOrder(symbol, volume, openPrice, sl, t, opts)
+          : type === "buy_limit" ? await c.createLimitBuyOrder(symbol, volume, openPrice, sl, t, opts)
+          : await c.createLimitSellOrder(symbol, volume, openPrice, sl, t, opts);
+        return this.check(res);
+      } catch (e) { throw normalizeTradeError(e); }
+    });
+  }
+
+  async cancelOrder(id: string, orderId: string): Promise<TradeResponse> {
+    return this.withConn(id, async (c) => {
+      try { return this.check(await c.cancelOrder(orderId)); } catch (e) { throw normalizeTradeError(e); }
+    });
+  }
+
+  /** Pending orders currently live at the broker. */
+  async orders(id: string): Promise<PendingOrder[]> {
+    const list: PendingOrder[] = await this.withConn(id, (c) => c.getOrders());
+    return list.map((x) => ({ ...x, id: String(x.id) }));
+  }
+
+  /** Orders that left the book (filled, cancelled, expired) in a time range. */
+  async historyOrders(id: string, from: Date, to: Date): Promise<PendingOrder[]> {
+    const res: { historyOrders: PendingOrder[] } = await this.withConn(id, (c) => c.getHistoryOrdersByTimeRange(from, to));
+    return (res.historyOrders ?? []).map((x) => ({ ...x, id: String(x.id) }));
   }
 
   async modifyPosition(id: string, positionId: string, sl: number | undefined, tp: number | undefined): Promise<TradeResponse> {
