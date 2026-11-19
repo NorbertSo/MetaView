@@ -41,6 +41,8 @@ export interface BuiltContext {
   equity: number;
   peakEquity: number;
   dayStartEquity: number;
+  /** Set when params.setups.gate is on and nothing is actionable: the run is skipped without calling the model. */
+  gateSkip: string | null;
 }
 
 const DEFAULT_CANDLES: Record<string, number> = { "1h": 120, "4h": 120, "1d": 120 };
@@ -152,6 +154,17 @@ export async function buildContext(ctx: Ctx, mt: MetaApiManager, a: AgentFull): 
     ? await computeSetups(mt, a.metaapi_account_id, a.params.setups, positions.map((p) => ({ position_ref: p.position_ref, symbol: p.symbol, opened_at: p.opened_at })), now.getTime())
     : null;
 
+  let gateSkip: string | null = null;
+  if (a.params.setups?.gate && setups && !positions.length && !pendingOrders.length) {
+    const actionable = Object.values(setups).some((v) => {
+      const x = v as { orb60?: { suggested_order: unknown }; zones_h4?: { signal: unknown; bars_since_signal_bar_close_min: number | null } };
+      if (x.orb60?.suggested_order) return true;
+      if (x.zones_h4?.signal && (x.zones_h4.bars_since_signal_bar_close_min ?? 999) <= 90) return true;
+      return false;
+    });
+    if (!actionable) gateSkip = "no actionable setup, no positions or pending orders";
+  }
+
   const json = {
     now_utc: now.toISOString(),
     agent: {
@@ -179,5 +192,5 @@ export async function buildContext(ctx: Ctx, mt: MetaApiManager, a: AgentFull): 
     news: news.map((n) => ({ time_utc: n.published_at.toISOString(), source: n.source, title: n.title, summary: n.summary, importance: n.importance, instruments: n.instruments })),
     lessons: lessons.map((l) => l.body),
   };
-  return { json, briefId: brief?.id ?? null, lessonIds: lessons.map((l) => l.id), quotes, positionsByRef, ordersByRef, equity, peakEquity, dayStartEquity };
+  return { json, briefId: brief?.id ?? null, lessonIds: lessons.map((l) => l.id), quotes, positionsByRef, ordersByRef, gateSkip, equity, peakEquity, dayStartEquity };
 }

@@ -47,6 +47,7 @@ export async function runAgent(ctx: Ctx, mt: MetaApiManager, agentId: string, tr
     }
 
     const built = await buildContext(ctx, mt, a);
+    if (built.gateSkip) { await finish("skipped", { skip: built.gateSkip }); return { runId, status: "skipped" }; }
     const system = buildSystemPrompt(a.rules_md, a.system_prompt);
     let result;
     try {

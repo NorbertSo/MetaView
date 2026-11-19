@@ -1,4 +1,5 @@
 import { Cron } from "croner";
+import { parseCronTz } from "@tv/core";
 import type { Ctx } from "./context.js";
 import type { MetaApiManager } from "./metaapi/manager.js";
 import { runAgent } from "./agent/runner.js";
@@ -13,10 +14,11 @@ import { actualsDueSoon } from "./sources/tradingview.js";
 import { notify } from "./telegram.js";
 import { heartbeat, syncAll } from "./trading/sync.js";
 
-/** True when a 5-field cron expression fires at the given minute (UTC). */
-export function firesAt(expr: string, minute: Date): boolean {
+/** True when a 5-field cron expression (UTC, or "TZ=Area/City ...") fires at the given minute. */
+export function firesAt(raw: string, minute: Date): boolean {
   try {
-    const c = new Cron(expr, { paused: true, timezone: "UTC" });
+    const { expr, timezone } = parseCronTz(raw);
+    const c = new Cron(expr, { paused: true, timezone });
     const next = c.nextRun(new Date(minute.getTime() - 1000));
     c.stop();
     return !!next && next.getTime() === minute.getTime();

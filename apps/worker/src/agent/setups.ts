@@ -11,6 +11,8 @@ import type { MetaApiManager } from "../metaapi/manager.js";
  * }
  */
 export interface SetupParams {
+  /** Skip the model call when no setup is actionable and the agent has no positions/pending orders. */
+  gate?: boolean;
   orb?: { symbols: Record<string, { tz: string; open: string; close: string }>; range_minutes?: number; entry_window_minutes?: number; sma_days?: number; max_days?: number };
   zones?: { symbols: Record<string, { tz: string }>; pivot?: number; look_days?: number; width_pct?: number; min_reactions?: number; trend_sma?: number; max_days?: number };
 }
